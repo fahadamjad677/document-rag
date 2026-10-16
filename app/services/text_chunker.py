@@ -1,62 +1,97 @@
 
-from uuid import uuid4
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas import DocumentChunk, PDFIngestionResponse
+from app.schemas import PageText
 
 
-def chunk_document(
-    document: PDFIngestionResponse,
-    chunk_size: int = 800,
-    overlap: int = 100,
-) -> list[DocumentChunk]:
+class TextChunk(BaseModel):
+    """A chunk of text with its original page location."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    chunk_index: int = Field(ge=0)
+    page_number: int = Field(ge=1)
+    start_char: int = Field(ge=0)
+    end_char: int = Field(ge=1)
+    text: str
+
+
+def chunk_pages(
+    pages: list[PageText],
+    *,
+    chunk_size: int = 1000,
+    overlap: int = 150,
+) -> list[TextChunk]:
     """
-    Split extracted PDF page text into overlapping character chunks.
+    Split page text into fixed-size character windows.
 
-    Character offsets are relative to the original page text.
-    Empty and whitespace-only sections are skipped.
+    Pages are processed independently to preserve page-level
+    source metadata. Character offsets refer to the original
+    PageText.text string.
+
+    Args:
+        pages: Extracted PDF pages.
+        chunk_size: Maximum characters in each chunk.
+        overlap: Characters shared by adjacent chunks on a page.
+
+    Returns:
+        Chunks ordered by page and then by position.
+
+    Raises:
+        ValueError: If the chunking configuration is invalid.
     """
-
     if chunk_size <= 0:
-        raise ValueError("chunk_size must be greater than zero")
+        raise ValueError("chunk_size must be greater than zero.")
 
     if overlap < 0:
-        raise ValueError("overlap cannot be negative")
+        raise ValueError("overlap cannot be negative.")
 
     if overlap >= chunk_size:
-        raise ValueError("overlap must be smaller than chunk_size")
+        raise ValueError("overlap must be smaller than chunk_size.")
 
-    chunks: list[DocumentChunk] = []
+    chunks: list[TextChunk] = []
+    stride = chunk_size - overlap
 
-    for page in document.pages:
-        page_text = page.text
+    for page in pages:
+        text = page.text
+        text_length = len(text)
 
-        if not page_text.strip():
+        if not text.strip():
             continue
 
         start = 0
 
-        while start < len(page_text):
-            end = min(start + chunk_size, len(page_text))
-            chunk_text = page_text[start:end]
+        while start < text_length:
+            end = min(start + chunk_size, text_length)
 
-            if chunk_text.strip():
+            # Remove only whitespace at the window boundaries.
+            # Keep offsets aligned with the original page text.
+            actual_start = start
+            actual_end = end
+
+            while (
+                actual_start < actual_end
+                and text[actual_start].isspace()
+            ):
+                actual_start += 1
+
+            while (
+                actual_end > actual_start
+                and text[actual_end - 1].isspace()
+            ):
+                actual_end -= 1
+
+            if actual_start < actual_end:
                 chunks.append(
-                    DocumentChunk(
-                        chunk_id=str(uuid4()),
-                        document_id=document.document_id,
-                        filename=document.filename,
+                    TextChunk(
                         chunk_index=len(chunks),
                         page_number=page.page_number,
-                        text=chunk_text,
-                        start_char=start,
-                        end_char=end,
+                        start_char=actual_start,
+                        end_char=actual_end,
+                        text=text[actual_start:actual_end],
                     )
                 )
 
-            if end == len(page_text):
-                break
-
-            # Move forward while retaining the requested overlap.
-            start = end - overlap
+            start += stride
 
     return chunks

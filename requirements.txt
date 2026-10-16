@@ -4,3 +4,6 @@ uvicorn[standard]
 python-multipart
 pymupdf
 pydantic-settings
+pytest
+httpx
+pytest-asyncio

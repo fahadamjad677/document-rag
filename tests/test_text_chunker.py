@@ -1,92 +1,115 @@
 
 import pytest
 
-from app.schemas import PDFIngestionResponse, PageText
-from app.services.text_chunker import chunk_document
+from app.schemas import PageText
+from app.services.text_chunker import chunk_pages
 
 
-def make_document(
-    page_texts: list[str],
-) -> PDFIngestionResponse:
+def make_page(
+    page_number: int,
+    text: str,
+) -> PageText:
+    return PageText(
+        page_number=page_number,
+        text=text,
+    )
+
+
+def test_empty_page_list_returns_no_chunks() -> None:
+    assert chunk_pages([]) == []
+
+
+def test_whitespace_only_pages_are_skipped() -> None:
     pages = [
-        PageText(page_number=index, text=text)
-        for index, text in enumerate(page_texts, start=1)
+        make_page(1, ""),
+        make_page(2, "   \n\t "),
     ]
 
-    return PDFIngestionResponse(
-        document_id="doc_test",
-        filename="test.pdf",
-        page_count=len(pages),
-        extracted_characters=sum(
-            len(page.text) for page in pages
-        ),
-        extraction_status=(
-            "text_extracted"
-            if any(page.text.strip() for page in pages)
-            else "no_extractable_text"
-        ),
-        pages=pages,
-    )
+    assert chunk_pages(pages) == []
 
 
-def test_short_text_produces_one_chunk() -> None:
-    document = make_document(["Hello RAG"])
+def test_short_page_produces_one_chunk() -> None:
+    pages = [make_page(1, "Hello, RAG!")]
 
-    chunks = chunk_document(
-        document,
-        chunk_size=10,
-        overlap=2,
-    )
-
-    assert len(chunks) == 1
-    assert chunks[0].text == "Hello RAG"
-    assert chunks[0].page_number == 1
-    assert chunks[0].start_char == 0
-    assert chunks[0].end_char == 9
-
-
-def test_chunks_have_expected_overlap() -> None:
-    text = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    document = make_document([text])
-
-    chunks = chunk_document(
-        document,
-        chunk_size=10,
-        overlap=3,
-    )
-
-    assert len(chunks) == 4
-    assert chunks[0].text == text[0:10]
-    assert chunks[1].text == text[7:17]
-    assert chunks[2].text == text[14:24]
-    assert chunks[3].text == text[21:26]
-
-
-def test_empty_pages_produce_no_chunks() -> None:
-    document = make_document(["", "   ", "\n"])
-
-    chunks = chunk_document(document)
-
-    assert chunks == []
-
-
-def test_page_metadata_is_preserved() -> None:
-    document = make_document([
-        "First page content",
-        "Second page content",
-    ])
-
-    chunks = chunk_document(
-        document,
+    chunks = chunk_pages(
+        pages,
         chunk_size=100,
         overlap=10,
     )
 
-    assert [chunk.page_number for chunk in chunks] == [1, 2]
-    assert [chunk.chunk_index for chunk in chunks] == [0, 1]
-    assert all(
-        chunk.document_id == "doc_test"
-        for chunk in chunks
+    assert len(chunks) == 1
+    assert chunks[0].text == "Hello, RAG!"
+    assert chunks[0].page_number == 1
+    assert chunks[0].chunk_index == 0
+    assert chunks[0].start_char == 0
+    assert chunks[0].end_char == len("Hello, RAG!")
+
+
+def test_chunks_respect_size_and_overlap() -> None:
+    text = "abcdefghijklmnopqrstuvwxyz"
+
+    chunks = chunk_pages(
+        [make_page(1, text)],
+        chunk_size=10,
+        overlap=3,
+    )
+
+    assert [chunk.text for chunk in chunks] == [
+        "abcdefghij",
+        "hijklmnopq",
+        "opqrstuvwx",
+        "vwxyz",
+    ]
+
+    assert chunks[0].text[7:] == chunks[1].text[:3]
+    assert chunks[1].text[7:] == chunks[2].text[:3]
+
+
+def test_chunk_offsets_match_original_page_text() -> None:
+    text = "  Annual leave policy applies to employees.  "
+
+    chunks = chunk_pages(
+        [make_page(4, text)],
+        chunk_size=15,
+        overlap=5,
+    )
+
+    for chunk in chunks:
+        assert (
+            text[chunk.start_char:chunk.end_char]
+            == chunk.text
+        )
+
+
+def test_page_numbers_are_preserved() -> None:
+    pages = [
+        make_page(2, "First page content."),
+        make_page(7, "Second page content."),
+    ]
+
+    chunks = chunk_pages(
+        pages,
+        chunk_size=100,
+        overlap=10,
+    )
+
+    assert [chunk.page_number for chunk in chunks] == [2, 7]
+
+
+def test_chunk_indices_are_sequential() -> None:
+    pages = [
+        make_page(1, "a" * 25),
+        make_page(2, "b" * 25),
+    ]
+
+    chunks = chunk_pages(
+        pages,
+        chunk_size=10,
+        overlap=2,
+    )
+
+    assert [chunk.chunk_index for chunk in chunks] == list(
+        range(len(chunks))
     )
 
 
@@ -104,11 +127,24 @@ def test_invalid_configuration_is_rejected(
     chunk_size: int,
     overlap: int,
 ) -> None:
-    document = make_document(["Some text"])
-
     with pytest.raises(ValueError):
-        chunk_document(
-            document,
+        chunk_pages(
+            [make_page(1, "Example text.")],
             chunk_size=chunk_size,
             overlap=overlap,
         )
+
+
+def test_whitespace_is_trimmed_without_breaking_offsets() -> None:
+    text = "  Hello world  "
+
+    chunks = chunk_pages(
+        [make_page(1, text)],
+        chunk_size=8,
+        overlap=2,
+    )
+
+    assert chunks[0].text == "Hello"
+    assert text[
+        chunks[0].start_char:chunks[0].end_char
+    ] == chunks[0].text
